@@ -24,7 +24,7 @@ export function Builder() {
   >([]);
   const [loading, setLoading] = useState(false);
   const [templateSet, setTemplateSet] = useState(false);
-  const webcontainer = useWebContainer();
+  const { webcontainer, error: webcontainerError } = useWebContainer();
 
   const [currentStep, setCurrentStep] = useState(1);
   const [activeTab, setActiveTab] = useState<"code" | "preview">("code");
@@ -144,6 +144,7 @@ export function Builder() {
 
     const { prompts, uiPrompts } = response.data;
 
+    // Initialize steps with the first set of steps
     setSteps(
       parseXml(uiPrompts[0]).map((x: Step) => ({
         ...x,
@@ -161,13 +162,18 @@ export function Builder() {
 
     setLoading(false);
 
-    setSteps((s) => [
-      ...s,
-      ...parseXml(stepsResponse.data.response).map((x) => ({
-        ...x,
-        status: "pending" as const, // Changed to as const
-      })),
-    ]);
+    // When adding new steps, ensure unique IDs by offsetting them
+    setSteps((currentSteps) => {
+      const maxId = Math.max(...currentSteps.map(step => step.id), 0);
+      return [
+        ...currentSteps,
+        ...parseXml(stepsResponse.data.response).map((x, index) => ({
+          ...x,
+          id: maxId + index + 1,
+          status: "pending" as const,
+        })),
+      ];
+    });
 
     setLlmMessages(
       [...prompts, prompt].map((content) => ({
@@ -270,12 +276,22 @@ export function Builder() {
             <div className="h-[calc(100%-4rem)]">
               {activeTab === "code" ? (
                 <CodeEditor file={selectedFile} />
-              ) : webcontainer ? (
-                <PreviewFrame webContainer={webcontainer} files={createMountStructure(files)} />
-              ) : (
+              ) : webcontainerError ? (
+                <div className="flex items-center justify-center h-full">
+                  <div className="text-center text-red-400">
+                    <p className="mb-2">Failed to initialize preview:</p>
+                    <p className="text-sm">{webcontainerError}</p>
+                    <p className="text-xs mt-4">
+                      Note: WebContainer requires a secure context (HTTPS) or localhost
+                    </p>
+                  </div>
+                </div>
+              ) : !webcontainer ? (
                 <div className="flex items-center justify-center h-full">
                   <p className="text-gray-400">Loading web container...</p>
                 </div>
+              ) : (
+                <PreviewFrame webContainer={webcontainer} files={createMountStructure(files)} />
               )}
             </div>
           </div>
