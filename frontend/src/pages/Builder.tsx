@@ -24,7 +24,7 @@ export function Builder() {
   >([]);
   const [loading, setLoading] = useState(false);
   const [templateSet, setTemplateSet] = useState(false);
-  const { webcontainer, error: webcontainerError } = useWebContainer();
+  const { webcontainer } = useWebContainer();
 
   const [currentStep, setCurrentStep] = useState(1);
   const [activeTab, setActiveTab] = useState<"code" | "preview">("code");
@@ -35,21 +35,37 @@ export function Builder() {
   const [files, setFiles] = useState<FileItem[]>([]);
 
   const createMountStructure = (fileItems: FileItem[]): FileSystemTree => {
-    const mountStructure: FileSystemTree = {};
+    const mountStructure: FileSystemTree = {
+      src: { directory: {} },
+      public: { directory: {} }
+    };
 
-    const processFile = (file: FileItem, currentPath: string = '') => {
-      const filePath = currentPath ? `${currentPath}/${file.name}` : file.name;
-
+    const processFile = (file: FileItem) => {
+      const normalizedPath = file.path?.replace(/^\/+/, '') || '';
+      const parts = normalizedPath.split('/');
+      
       if (file.type === 'file') {
-        mountStructure[filePath] = {
+        const dirPath = parts.slice(0, -1).join('/');
+        const fileName = parts[parts.length - 1];
+        
+        let current = mountStructure;
+        if (dirPath) {
+          const dirs = dirPath.split('/');
+          for (const dir of dirs) {
+            if (!current[dir]) {
+              current[dir] = { directory: {} };
+            }
+            current = (current[dir] as { directory: FileSystemTree }).directory;
+          }
+        }
+        
+        current[fileName] = {
           file: { contents: file.content || '' }
         };
-      } else if (file.type === 'folder' && file.children) {
-        file.children.forEach(child => processFile(child, filePath));
       }
     };
 
-    fileItems.forEach(file => processFile(file));
+    fileItems.forEach(processFile);
     return mountStructure;
   };
 
@@ -61,13 +77,13 @@ export function Builder() {
       .forEach((step) => {
         updateHappened = true;
         if (step?.type === StepType.CreateFile) {
-          let parsedPath = step.path?.split("/") ?? [];
+          let parsedPath = step.path?.replace(/^\/+/, '').split("/") ?? [];
           let currentFileStructure = [...originalFiles];
           const finalAnswerRef = currentFileStructure;
 
           let currentFolder = "";
           while (parsedPath.length) {
-            currentFolder = `${currentFolder}/${parsedPath[0]}`;
+            currentFolder = currentFolder ? `${currentFolder}/${parsedPath[0]}` : parsedPath[0];
             const currentFolderName = parsedPath[0];
             parsedPath = parsedPath.slice(1);
 
@@ -112,7 +128,7 @@ export function Builder() {
       setSteps((steps) =>
         steps.map((s: Step) => ({
           ...s,
-          status: "completed",
+          status: "completed" as const,
         }))
       );
     }
@@ -137,56 +153,107 @@ export function Builder() {
   }, [files, webcontainer]);
 
   async function init() {
-    const response = await axios.post(`${BACKEND_URL}/template`, {
-      prompt: prompt.trim(),
-    });
-    setTemplateSet(true);
+    try {
+      const response = await axios.post(`${BACKEND_URL}/template`, {
+        prompt: prompt.trim(),
+      });
+      setTemplateSet(true);
 
-    const { prompts, uiPrompts } = response.data;
+      const { prompts, uiPrompts } = response.data;
+      setLoading(true);
 
-    setSteps(
-      parseXml(uiPrompts[0]).map((x: Step) => ({
+      // First, get the template steps with proper typing
+      const templateSteps = parseXml(uiPrompts[0]).map((x: Step, index) => ({
         ...x,
-        status: "pending",
-      }))
-    );
+        id: index + 1,
+        status: "pending" as const,
+      }));
 
-    setLoading(true);
-    const stepsResponse = await axios.post(`${BACKEND_URL}/chat`, {
-      messages: [...prompts, prompt].map((content) => ({
-        role: "user",
-        content,
-      })),
-    });
+      // Then, get the chat response
+      const stepsResponse = await axios.post(`${BACKEND_URL}/chat`, {
+        messages: [...prompts, prompt].map((content) => ({
+          role: "user",
+          content,
+        })),
+      });
 
-    setLoading(false);
-
-    setSteps((s) => [
-      ...s,
-      ...parseXml(stepsResponse.data.response).map((x) => ({
+      // Parse the chat response steps with proper typing
+      const chatSteps = parseXml(stepsResponse.data.response).map((x, index) => ({
         ...x,
-        status: "pending" as const, // Changed to as const
-      })),
-    ]);
+        id: templateSteps.length + index + 1,
+        status: "pending" as const,
+      }));
 
-    setLlmMessages(
-      [...prompts, prompt].map((content) => ({
-        role: "user",
-        content,
-      }))
-    );
+      // Set all steps at once
+      setSteps([...templateSteps, ...chatSteps]);
 
-    setLlmMessages((x) => [
-      ...x,
-      { role: "assistant", content: stepsResponse.data.response },
-    ]);
+      // Update messages
+      setLlmMessages([
+        ...[...prompts, prompt].map((content) => ({
+          role: "user" as const,
+          content,
+        })),
+        {
+          role: "assistant" as const,
+          content: stepsResponse.data.response,
+        },
+      ]);
+    } catch (error) {
+      console.error('Error in init:', error);
+    } finally {
+      setLoading(false);
+    }
   }
 
   useEffect(() => {
     if (prompt) {
       init();
     }
-  }, [prompt]); // Adding init here would cause an infinite loop, so we leave it out
+  }, [prompt]);
+
+  const handleSendMessage = async () => {
+    if (!userPrompt.trim()) return;
+
+    const newMessage = {
+      role: "user" as const,
+      content: userPrompt,
+    };
+
+    try {
+      setLoading(true);
+      const stepsResponse = await axios.post(`${BACKEND_URL}/chat`, {
+        messages: [...llmMessages, newMessage],
+      });
+
+      // Update messages first
+      setLlmMessages((prev) => [
+        ...prev,
+        newMessage,
+        {
+          role: "assistant" as const,
+          content: stepsResponse.data.response,
+        },
+      ]);
+
+      // Then update steps with unique numeric IDs
+      setSteps((currentSteps) => {
+        const maxId = currentSteps.reduce((max, step) => Math.max(max, step.id), 0);
+        const newSteps = parseXml(stepsResponse.data.response).map((x, index) => ({
+          ...x,
+          id: maxId + index + 1,
+          status: "pending" as const,
+        }));
+
+        return [...currentSteps, ...newSteps];
+      });
+
+      setPrompt(""); // Clear the input
+    } catch (error) {
+      console.error('Error sending message:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-gray-900 flex flex-col">
@@ -214,45 +281,13 @@ export function Builder() {
                     <div className="flex">
                       <textarea
                         value={userPrompt}
-                        onChange={(e) => {
-                          setPrompt(e.target.value);
-                        }}
+                        onChange={(e) => setPrompt(e.target.value)}
                         className="p-2 w-full"
-                      ></textarea>
+                      />
                       <button
-                        onClick={async () => {
-                          const newMessage = {
-                            role: "user" as const, // Changed to as const
-                            content: userPrompt,
-                          };
-
-                          setLoading(true);
-                          const stepsResponse = await axios.post(
-                            `${BACKEND_URL}/chat`,
-                            {
-                              messages: [...llmMessages, newMessage],
-                            }
-                          );
-                          setLoading(false);
-
-                          setLlmMessages((x) => [...x, newMessage]);
-                          setLlmMessages((x) => [
-                            ...x,
-                            {
-                              role: "assistant",
-                              content: stepsResponse.data.response,
-                            },
-                          ]);
-
-                          setSteps((s) => [
-                            ...s,
-                            ...parseXml(stepsResponse.data.response).map((x) => ({
-                              ...x,
-                              status: "pending" as const, // Changed to as const
-                            })),
-                          ]);
-                        }}
-                        className="bg-purple-400 px-4"
+                        onClick={handleSendMessage}
+                        disabled={loading}
+                        className="bg-purple-400 px-4 disabled:opacity-50"
                       >
                         Send
                       </button>
