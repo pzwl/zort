@@ -34,27 +34,22 @@ export function Builder() {
 
   const [files, setFiles] = useState<FileItem[]>([]);
 
-  // Move createMountStructure function out of useEffect to component scope
   const createMountStructure = (fileItems: FileItem[]): FileSystemTree => {
     const mountStructure: FileSystemTree = {};
 
-    const processFile = (file: FileItem, isRootFolder: boolean) => {
-      if (file.type === "file") {
-        mountStructure[file.name] = {
+    const processFile = (file: FileItem, currentPath: string = '') => {
+      const filePath = currentPath ? `${currentPath}/${file.name}` : file.name;
+
+      if (file.type === 'file') {
+        mountStructure[filePath] = {
           file: { contents: file.content || '' }
         };
-      } else if (file.children) {
-        const folderStructure: FileSystemTree = {};
-        file.children.forEach(child => processFile(child, false));
-        if (!isRootFolder) {
-          mountStructure[file.name] = {
-            directory: folderStructure
-          };
-        }
+      } else if (file.type === 'folder' && file.children) {
+        file.children.forEach(child => processFile(child, filePath));
       }
     };
 
-    fileItems.forEach(file => processFile(file, true));
+    fileItems.forEach(file => processFile(file));
     return mountStructure;
   };
 
@@ -63,22 +58,21 @@ export function Builder() {
     let updateHappened = false;
     steps
       .filter(({ status }) => status === "pending")
-      .map((step) => {
+      .forEach((step) => {
         updateHappened = true;
         if (step?.type === StepType.CreateFile) {
-          let parsedPath = step.path?.split("/") ?? []; // ["src", "components", "App.tsx"]
-          let currentFileStructure = [...originalFiles]; // {}
-          const finalAnswerRef = currentFileStructure; // Changed to const
+          let parsedPath = step.path?.split("/") ?? [];
+          let currentFileStructure = [...originalFiles];
+          const finalAnswerRef = currentFileStructure;
 
           let currentFolder = "";
           while (parsedPath.length) {
             currentFolder = `${currentFolder}/${parsedPath[0]}`;
-            const currentFolderName = parsedPath[0]; // Changed to const
+            const currentFolderName = parsedPath[0];
             parsedPath = parsedPath.slice(1);
 
             if (!parsedPath.length) {
-              // final file
-              const file = currentFileStructure.find( // Changed to const
+              const file = currentFileStructure.find(
                 (x) => x.path === currentFolder
               );
               if (!file) {
@@ -92,12 +86,10 @@ export function Builder() {
                 file.content = step.code;
               }
             } else {
-              /// in a folder
-              const folder = currentFileStructure.find( // Changed to const
+              const folder = currentFileStructure.find(
                 (x) => x.path === currentFolder
               );
               if (!folder) {
-                // create the folder
                 currentFileStructure.push({
                   name: currentFolderName,
                   type: "folder",
@@ -118,22 +110,30 @@ export function Builder() {
     if (updateHappened) {
       setFiles(originalFiles);
       setSteps((steps) =>
-        steps.map((s: Step) => {
-          return {
-            ...s,
-            status: "completed",
-          };
-        })
+        steps.map((s: Step) => ({
+          ...s,
+          status: "completed",
+        }))
       );
     }
-    console.log(files);
-  }, [steps, files]);
+  }, [steps]);
 
   useEffect(() => {
-    if (webcontainer && files.length > 0) {
-      const structure = createMountStructure(files);
-      webcontainer.mount(structure);
-    }
+    const mountFiles = async () => {
+      if (webcontainer && files.length > 0) {
+        try {
+          console.log('Mounting files:', files);
+          const structure = createMountStructure(files);
+          console.log('Mount structure:', structure);
+          await webcontainer.mount(structure);
+          console.log('Files mounted successfully');
+        } catch (err) {
+          console.error('Error mounting files:', err);
+        }
+      }
+    };
+
+    mountFiles();
   }, [files, webcontainer]);
 
   async function init() {
@@ -144,7 +144,6 @@ export function Builder() {
 
     const { prompts, uiPrompts } = response.data;
 
-    // Initialize steps with the first set of steps
     setSteps(
       parseXml(uiPrompts[0]).map((x: Step) => ({
         ...x,
@@ -162,18 +161,13 @@ export function Builder() {
 
     setLoading(false);
 
-    // When adding new steps, ensure unique IDs by offsetting them
-    setSteps((currentSteps) => {
-      const maxId = Math.max(...currentSteps.map(step => step.id), 0);
-      return [
-        ...currentSteps,
-        ...parseXml(stepsResponse.data.response).map((x, index) => ({
-          ...x,
-          id: maxId + index + 1,
-          status: "pending" as const,
-        })),
-      ];
-    });
+    setSteps((s) => [
+      ...s,
+      ...parseXml(stepsResponse.data.response).map((x) => ({
+        ...x,
+        status: "pending" as const, // Changed to as const
+      })),
+    ]);
 
     setLlmMessages(
       [...prompts, prompt].map((content) => ({
@@ -276,22 +270,12 @@ export function Builder() {
             <div className="h-[calc(100%-4rem)]">
               {activeTab === "code" ? (
                 <CodeEditor file={selectedFile} />
-              ) : webcontainerError ? (
-                <div className="flex items-center justify-center h-full">
-                  <div className="text-center text-red-400">
-                    <p className="mb-2">Failed to initialize preview:</p>
-                    <p className="text-sm">{webcontainerError}</p>
-                    <p className="text-xs mt-4">
-                      Note: WebContainer requires a secure context (HTTPS) or localhost
-                    </p>
-                  </div>
-                </div>
-              ) : !webcontainer ? (
+              ) : webcontainer ? (
+                <PreviewFrame webContainer={webcontainer} files={createMountStructure(files)} />
+              ) : (
                 <div className="flex items-center justify-center h-full">
                   <p className="text-gray-400">Loading web container...</p>
                 </div>
-              ) : (
-                <PreviewFrame webContainer={webcontainer} files={createMountStructure(files)} />
               )}
             </div>
           </div>
